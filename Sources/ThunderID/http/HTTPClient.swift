@@ -56,6 +56,21 @@ final class HTTPClient {
         let _: EmptyResponse = try await perform(request)
     }
 
+    /// POSTs `body` to an endpoint that answers `204 No Content`. A non-2xx status is surfaced as a
+    /// `ThunderIDError` rather than swallowed by a discarded `try?`, so callers can react to `403`/`400`.
+    func postNoContent(
+        path: String,
+        body: [String: Any],
+        requiresAuth: Bool = true,
+        headers: [String: String] = [:]
+    ) async throws {
+        var request = try await buildRequest(method: "POST", path: path, body: body, requiresAuth: requiresAuth)
+        for (name, value) in headers {
+            request.setValue(value, forHTTPHeaderField: name)
+        }
+        let _: EmptyResponse = try await perform(request)
+    }
+
     private func buildRequest(
         method: String, path: String, body: [String: Any]?, requiresAuth: Bool
     ) async throws -> URLRequest {
@@ -113,6 +128,10 @@ final class HTTPClient {
             throw ThunderIDError(code: .invalidInput, message: detail)
         case 401:
             throw ThunderIDError(code: .authenticationFailed, message: "Unauthorized")
+        case 403:
+            let msgBody = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            let detail = msgBody?["message"] as? String ?? "The current value is incorrect"
+            throw ThunderIDError(code: .invalidCredential, message: detail)
         case 409:
             throw ThunderIDError(code: .userAlreadyExists, message: "Conflict")
         case 500...599:

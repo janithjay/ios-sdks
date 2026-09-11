@@ -13,6 +13,7 @@ public enum ThunderIDErrorCode: String {
 
     // Authentication
     case authenticationFailed = "AUTHENTICATION_FAILED"
+    case invalidCredential = "INVALID_CREDENTIAL"
     case userAccountLocked = "USER_ACCOUNT_LOCKED"
     case userAccountDisabled = "USER_ACCOUNT_DISABLED"
     case sessionExpired = "SESSION_EXPIRED"

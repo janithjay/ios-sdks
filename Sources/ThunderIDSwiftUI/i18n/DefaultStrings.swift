@@ -34,6 +34,17 @@ public enum DefaultStrings {
         "userProfile.error.save": "Failed to save changes.",
         "userProfile.validation.required": "This field is required.",
         "userProfile.validation.pattern": "This value is not valid.",
+        "changeCredential.heading": "Change {credential}",
+        "changeCredential.current.label": "Current {credential}",
+        "changeCredential.new.label": "New {credential}",
+        "changeCredential.confirm.label": "Confirm New {credential}",
+        "changeCredential.submit": "Update {credential}",
+        "changeCredential.success": "Your {credentialLower} has been updated.",
+        "changeCredential.mismatch.error": "{credential}s do not match.",
+        "changeCredential.requirements.pattern": "Matches the required format",
+        "changeCredential.current.invalid.error": "Your current {credentialLower} is incorrect.",
+        "changeCredential.generic.error": "An error occurred while updating your {credentialLower}. Please try again.",
+        "changeCredential.unavailable": "This account does not use a {credentialLower}.",
         "languageSwitcher.title": "Language"
     ]
 }

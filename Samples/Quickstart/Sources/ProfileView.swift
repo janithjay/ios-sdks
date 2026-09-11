@@ -62,6 +62,16 @@ struct ProfileScreen: View {
 
                         detailsCard(profileState)
                             .padding(.horizontal, 20)
+                            .padding(.bottom, 8)
+
+                        // Each credentialSection manages one credential declared on the user type
+                        // schema; its heading and every label inside the card follow that
+                        // credential's own display name, so a second credential type (here "pin")
+                        // is just another call with a different configuration.
+                        credentialSection()
+                            .padding(.bottom, 24)
+
+                        credentialSection(credentialName: "pin", displayName: "PIN")
                             .padding(.bottom, 40)
                     }
                 }
@@ -118,6 +128,27 @@ struct ProfileScreen: View {
         Divider()
             .background(borderColor)
             .padding(.leading, 16)
+    }
+
+    /// BaseChangeCredential drives the schema policy, submission and error routing for one credential.
+    private func credentialSection(credentialName: String = "password", displayName: String? = nil) -> some View {
+        BaseChangeCredential(credentialName: credentialName, credentialDisplayName: displayName) { credentialState in
+            VStack(alignment: .leading, spacing: 0) {
+                sectionHeader("CHANGE \(credentialState.credentialDisplayName.uppercased())")
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 10)
+
+                CredentialCard(
+                    state: credentialState,
+                    textColor: textColor,
+                    mutedColor: mutedColor,
+                    borderColor: borderColor,
+                    cardColor: cardColor,
+                    primaryBlue: primaryBlue
+                )
+                .padding(.horizontal, 20)
+            }
+        }
     }
 }
 
@@ -181,6 +212,170 @@ private struct DetailFieldRow: View {
                 }
             }
             if let error = profileState.fieldError(field.name) {
+                Text(error)
+                    .font(.system(size: 11))
+                    .foregroundColor(.red)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+    }
+}
+
+/// Change-credential form styled to match the ACCOUNT DETAILS card.
+private struct CredentialCard: View {
+    @ObservedObject var state: ChangeCredentialState
+    let textColor: Color
+    let mutedColor: Color
+    let borderColor: Color
+    let cardColor: Color
+    let primaryBlue: Color
+
+    private var name: String { state.credentialDisplayName }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if state.unavailable {
+                HStack {
+                    Text(name)
+                        .font(.system(size: 14))
+                        .foregroundColor(textColor)
+                    Spacer()
+                    Text("Not used by this account")
+                        .font(.system(size: 13))
+                        .foregroundColor(mutedColor)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+                .background(cardColor)
+                .clipShape(RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(borderColor, lineWidth: 1))
+            } else {
+                form
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var form: some View {
+        let evaluation = state.evaluation
+        let ready = evaluation.isValid && !state.loading
+        let mismatch = !state.confirmValue.isEmpty && !evaluation.confirmMatches
+
+        VStack(spacing: 0) {
+            CredentialInputRow(
+                placeholder: "Current \(name)",
+                text: $state.currentValue,
+                error: state.fieldError(.current),
+                requirementMet: nil,
+                textColor: textColor,
+                mutedColor: mutedColor
+            )
+            divider
+            CredentialInputRow(
+                placeholder: "New \(name)",
+                text: $state.newValue,
+                error: state.fieldError(.new),
+                requirementMet: evaluation.patternChecked ? evaluation.patternPassed : nil,
+                textColor: textColor,
+                mutedColor: mutedColor
+            )
+            divider
+            CredentialInputRow(
+                placeholder: "Confirm New \(name)",
+                text: $state.confirmValue,
+                error: mismatch ? "\(name)s do not match." : nil,
+                requirementMet: nil,
+                textColor: textColor,
+                mutedColor: mutedColor
+            )
+            divider
+            Button {
+                state.submit()
+            } label: {
+                Text(state.loading ? "Updating…" : "Update \(name)")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(ready ? .white : mutedColor)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 15)
+                    .background(ready ? primaryBlue : borderColor.opacity(0.35))
+            }
+            .buttonStyle(.plain)
+            .disabled(!ready)
+        }
+        .background(cardColor)
+        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(borderColor, lineWidth: 1))
+
+        if let error = state.error {
+            Text(error)
+                .font(.system(size: 12))
+                .foregroundColor(.red)
+                .padding(.horizontal, 4)
+                .padding(.top, 6)
+        }
+        if state.success {
+            Text("Your \(name.lowercased()) has been updated.")
+                .font(.system(size: 12))
+                .foregroundColor(.green)
+                .padding(.horizontal, 4)
+                .padding(.top, 6)
+        }
+    }
+
+    private var divider: some View {
+        Divider()
+            .background(borderColor)
+            .padding(.leading, 16)
+    }
+}
+
+/// One credential field: left-aligned dynamic placeholder, eye toggle, optional requirement line.
+private struct CredentialInputRow: View {
+    let placeholder: String
+    @Binding var text: String
+    let error: String?
+    let requirementMet: Bool?
+    let textColor: Color
+    let mutedColor: Color
+
+    @State private var revealed = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Group {
+                    if revealed {
+                        TextField(placeholder, text: $text)
+                    } else {
+                        SecureField(placeholder, text: $text)
+                    }
+                }
+                .font(.system(size: 14))
+                .foregroundColor(textColor)
+                .textContentType(.password)
+                .autocorrectionDisabled()
+
+                Button {
+                    revealed.toggle()
+                } label: {
+                    Image(systemName: revealed ? "eye" : "eye.slash")
+                        .font(.system(size: 13))
+                        .foregroundColor(mutedColor)
+                }
+                .buttonStyle(.plain)
+            }
+            if let requirementMet {
+                HStack(spacing: 4) {
+                    Image(systemName: requirementMet ? "checkmark.circle.fill" : "xmark.circle")
+                        .font(.system(size: 11))
+                        .foregroundColor(requirementMet ? .green : mutedColor)
+                    Text("Matches the required format")
+                        .font(.system(size: 11))
+                        .foregroundColor(mutedColor)
+                }
+            }
+            if let error {
                 Text(error)
                     .font(.system(size: 11))
                     .foregroundColor(.red)

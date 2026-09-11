@@ -286,6 +286,27 @@ public final class ThunderIDClient {
         return try await httpClient!.put(path: "/users/me", body: ["attributes": payload])
     }
 
+    /// Changes one of the signed-in user's own credentials via `POST /users/me/update-credentials`.
+    ///
+    /// `currentValue` is required once the account already has a value stored for `credentialName`;
+    /// pass `nil` for a first-time set. A rejected current value surfaces as
+    /// ``ThunderIDErrorCode/invalidCredential``.
+    public func updateUserCredentials(
+        credentialName: String = "password",
+        currentValue: String?,
+        newValue: String
+    ) async throws {
+        try requireInitialized()
+        var credential: [String: Any] = ["newValue": newValue]
+        if let currentValue, !currentValue.isEmpty {
+            credential["currentValue"] = currentValue
+        }
+        try await httpClient!.postNoContent(
+            path: "/users/me/update-credentials",
+            body: [credentialName: credential]
+        )
+    }
+
     /// Overrides the cached user, e.g. after merging in freshly-fetched `/users/me` attributes.
     public func setCachedUser(_ user: User) {
         currentUser = user
