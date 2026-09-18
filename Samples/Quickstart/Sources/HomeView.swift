@@ -349,9 +349,9 @@ private struct HomeScreen: View {
 
     private var actionsCard: some View {
         VStack(spacing: 0) {
-            // My profile
+            // Manage Account
             Button(action: onProfile) {
-                actionRow(icon: "person.circle", label: "My profile", color: textColor)
+                actionRow(icon: "person.circle", label: "Manage Account", color: textColor)
             }
 
             Divider()

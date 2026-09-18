@@ -227,4 +227,18 @@ final class UserProfileFieldsTests: XCTestCase {
         let merged = deepMergeAttributes(base, overrides)
         XCTAssertEqual(merged["email"] as? String, "new@example.com")
     }
+
+    // MARK: - isPictureField
+
+    func testIsPictureFieldMatchesEverySharedPictureClaimCandidateCaseInsensitively() {
+        for candidate in pictureClaimKeys {
+            XCTAssertTrue(isPictureField(candidate), "expected '\(candidate)' to match")
+            XCTAssertTrue(isPictureField(candidate.uppercased()), "expected '\(candidate.uppercased())' to match")
+        }
+    }
+
+    func testIsPictureFieldDoesNotMatchAnUnrelatedAttributeName() {
+        XCTAssertFalse(isPictureField("firstName"))
+        XCTAssertFalse(isPictureField("email"))
+    }
 }
