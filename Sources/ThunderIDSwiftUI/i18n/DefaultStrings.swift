@@ -25,6 +25,7 @@ public enum DefaultStrings {
         "callback.error": "Could not complete sign-in",
         "user.anonymous": "Anonymous",
         "userProfile.title": "Profile",
+        "userProfile.section": "Personal info",
         "userProfile.save": "Save",
         "userProfile.loading": "Loading profile…",
         "userProfile.saving": "Saving…",

@@ -4,6 +4,10 @@
 import SwiftUI
 import ThunderID
 
+/// Candidate claim/attribute names that hold a picture URL, shared with `UserProfile.swift`'s
+/// `isPictureField` so the two stay in sync instead of drifting as separate lists.
+let pictureClaimKeys = ["picture", "profileUrl", "profile", "URL", "avatarUrl", "avatar"]
+
 /// Renders the current user's profile picture, or a deterministic two-color gradient circle with
 /// their initials when no picture is available (spec §8.4 Presentation).
 public struct UserAvatar: View {
@@ -81,9 +85,7 @@ public struct BaseUserAvatar: View {
     /// The user's profile picture, checked in the same order as the web SDK: the `picture`
     /// claim first, then a set of common alternate claim keys used by non-standard identity providers.
     private var pictureUrl: String? {
-        if let profilePicture = nonBlankString(user?["picture"]) { return profilePicture }
-        let alternateKeys = ["profileUrl", "profile", "URL", "avatarUrl", "avatar"]
-        for key in alternateKeys {
+        for key in pictureClaimKeys {
             if let value = nonBlankString(user?[key]) { return value }
         }
         return nil

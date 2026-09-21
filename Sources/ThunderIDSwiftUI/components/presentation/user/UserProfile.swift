@@ -4,237 +4,11 @@
 import SwiftUI
 import ThunderID
 
-// Attribute names that are always readonly regardless of schema mutability (data contract).
-private let readonlyFields: Set<String> = ["attributes", "id", "isReadOnly", "ouId", "username", "sub"]
-
-// Default logical-name -> attribute-path fallback mappings.
-private let defaultAttributeMappings: [String: [String]] = [
-    "email": ["emails", "email"],
-    "firstName": ["name.givenName", "given_name"],
-    "lastName": ["name.familyName", "family_name"],
-    "picture": ["profile", "profileUrl", "picture", "URL"],
-    "username": ["userName", "username", "user_name"]
-]
-
-/// A schema-described profile field merged with its current value, ready to render.
-public struct ProfileField: Identifiable {
-    public let name: String
-    public let schema: AttributeSchema
-    public let rawValue: Any?
-    public let isReadonly: Bool
-    public let isMultiValued: Bool
-
-    public var id: String { name }
-}
-
-/// Every non-credential schema attribute is shown by default.
-func buildProfileFields(schema: [String: AttributeSchema], profile: ThunderID.UserProfile) -> [ProfileField] {
-    schema
-        .filter { $0.value.credential != true }
-        .sorted { $0.key < $1.key }
-        .map { name, attr in
-            let rawValue = profile.attributes[name]?.value
-            return ProfileField(
-                name: name,
-                schema: attr,
-                rawValue: rawValue,
-                isReadonly: attr.readOnly == true || attr.mutability == "READ_ONLY" || readonlyFields.contains(name),
-                isMultiValued: rawValue is [AnyCodable]
-            )
-        }
-}
-
-/// Builds a read-only field list directly from JWT/userinfo claims (no schema to save against).
-func buildProfileFieldsFromClaims(_ user: User?) -> [ProfileField] {
-    let claims = user?.profileClaims ?? [:]
-    return claims
-        .compactMap { key, value -> (key: String, formatted: String)? in
-            guard let formatted = formatClaim(value.value) else { return nil }
-            return (key, formatted)
-        }
-        .sorted { claimLabel($0.key).lowercased() < claimLabel($1.key).lowercased() }
-        .map { key, formatted in
-            ProfileField(
-                name: key,
-                schema: AttributeSchema(displayName: claimLabel(key), readOnly: true, type: "STRING"),
-                rawValue: formatted,
-                isReadonly: true,
-                isMultiValued: false
-            )
-        }
-}
-
-func formatClaim(_ value: Any?) -> String? {
-    switch value {
-    case let text as String: return text.isEmpty ? nil : text
-    case let flag as Bool: return flag ? "Yes" : "No"
-    case let number as Int: return String(number)
-    case let number as Double: return String(number)
-    case let list as [AnyCodable]:
-        let items = list.compactMap { formatClaim($0.value) }
-        return items.isEmpty ? nil : items.joined(separator: ", ")
-    default: return nil
-    }
-}
-
-/// Humanizes a claim key for display: `given_name` -> "Given Name".
-func claimLabel(_ key: String) -> String {
-    key
-        .replacingOccurrences(of: "_", with: " ")
-        .replacingOccurrences(of: "([a-z0-9])([A-Z])", with: "$1 $2", options: .regularExpression)
-        .split(separator: " ")
-        .map { $0.prefix(1).uppercased() + $0.dropFirst() }
-        .joined(separator: " ")
-}
-
-func claimsDisplayName(_ user: User?) -> String {
-    guard let user else { return "Guest" }
-    let fullName = [user["given_name"] as? String, user["family_name"] as? String]
-        .compactMap { $0?.isEmpty == false ? $0 : nil }
-        .joined(separator: " ")
-    if !fullName.isEmpty { return fullName }
-    return user.displayName ?? user.username ?? user.email ?? "Guest"
-}
-
-/// Validates an edited field value against its schema: required first, then regex.
-func validateField(_ schema: AttributeSchema, _ value: String) -> String? {
-    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-    if schema.required == true && trimmed.isEmpty {
-        return "userProfile.validation.required"
-    }
-    if let pattern = schema.regex, !pattern.isEmpty, !trimmed.isEmpty,
-       let regex = try? NSRegularExpression(pattern: pattern) {
-        let range = NSRange(trimmed.startIndex..., in: trimmed)
-        if regex.firstMatch(in: trimmed, range: range) == nil {
-            return "userProfile.validation.pattern"
-        }
-    }
-    return nil
-}
-
-/// Resolves a logical attribute name (firstName, email, picture...) to a value on `profile` by
-/// trying each candidate path in `mappings` in order, falling back to the built-in defaults.
-func mapAttribute(_ key: String, _ mappings: [String: [String]], _ profile: ThunderID.UserProfile) -> String? {
-    guard let candidates = mappings[key] ?? defaultAttributeMappings[key] else {
-        return profile.attributes[key].map { "\($0.value)" }
-    }
-    for path in candidates {
-        if let resolved = resolveAttributePath(profile.attributes, path) {
-            return "\(resolved)"
-        }
-    }
-    return nil
-}
-
-/// Combines mapped firstName/lastName into a display name, falling back to username then id.
-func computeDisplayName(_ mappings: [String: [String]], _ profile: ThunderID.UserProfile) -> String {
-    let fullName = [
-        mapAttribute("firstName", mappings, profile),
-        mapAttribute("lastName", mappings, profile)
-    ]
-    .compactMap { $0 }
-    .joined(separator: " ")
-    .trimmingCharacters(in: .whitespaces)
-    if !fullName.isEmpty { return fullName }
-    return mapAttribute("username", mappings, profile) ?? profile.id
-}
-
-private func resolveAttributePath(_ attributes: [String: AnyCodable], _ path: String) -> Any? {
-    var current: Any? = attributes
-    for segment in path.split(separator: ".") {
-        guard let dict = current as? [String: AnyCodable] else { return nil }
-        current = dict[String(segment)]?.value
-    }
-    return current
-}
-
-/// Renders a raw field value for display/editing: joins list values, blanks out complex ones.
-public func stringifyFieldValue(_ rawValue: Any?) -> String {
-    switch rawValue {
-    case nil: return ""
-    case let list as [AnyCodable]: return list.map { "\($0.value)" }.joined(separator: ", ")
-    case is [String: AnyCodable]: return ""
-    default: return "\(rawValue ?? "")"
-    }
-}
-
-/// Builds the nested attributes payload segment for a single dot-path field save.
-func buildUpdatePayload(_ name: String, _ value: String, _ isMultiValued: Bool) -> [String: Any] {
-    let resolvedValue: Any = isMultiValued
-        ? value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-        : value
-    return buildNestedMap(name.split(separator: ".").map(String.init), resolvedValue)
-}
-
-private func buildNestedMap(_ segments: [String], _ value: Any) -> [String: Any] {
-    guard segments.count > 1 else { return [segments[0]: value] }
-    return [segments[0]: buildNestedMap(Array(segments.dropFirst()), value)]
-}
-
-// Recursively merges overrides onto base. The backend requires every required attribute present
-// in any save, so a single-field edit still needs the rest of the profile's attributes carried along.
-func deepMergeAttributes(_ base: [String: Any], _ overrides: [String: Any]) -> [String: Any] {
-    var result = base
-    for (key, value) in overrides {
-        if let baseDict = result[key] as? [String: Any], let overrideDict = value as? [String: Any] {
-            result[key] = deepMergeAttributes(baseDict, overrideDict)
-        } else {
-            result[key] = value
-        }
-    }
-    return result
-}
-
-/// Unwraps `AnyCodable` boxes so the result is safe to hand to `JSONSerialization` when saving.
-func deepUnwrapAttributes(_ attributes: [String: AnyCodable]) -> [String: Any] {
-    attributes.mapValues { deepUnwrapValue($0.value) }
-}
-
-private func deepUnwrapValue(_ value: Any) -> Any {
-    switch value {
-    case let dict as [String: AnyCodable]: return dict.mapValues { deepUnwrapValue($0.value) }
-    case let array as [AnyCodable]: return array.map { deepUnwrapValue($0.value) }
-    default: return value
-    }
-}
-
-/// State container passed to the BaseUserProfile builder.
-@MainActor
-public final class UserProfileState: ObservableObject {
-    @Published public fileprivate(set) var profile: ThunderID.UserProfile?
-    @Published public fileprivate(set) var fields: [ProfileField] = []
-    @Published public fileprivate(set) var displayName: String = ""
-    @Published public fileprivate(set) var email: String?
-    @Published public fileprivate(set) var isLoading: Bool = false
-    @Published public fileprivate(set) var error: String?
-
-    @Published fileprivate var editedValues: [String: String] = [:]
-    @Published fileprivate var editingFields: [String: Bool] = [:]
-    @Published fileprivate var fieldErrors: [String: String] = [:]
-
-    /// Held here, not as view `@State`, so saves always read the schema the load resolved.
-    fileprivate var schema: [String: AttributeSchema] = [:]
-
-    fileprivate var onEdit: (String) -> Void = { _ in }
-    fileprivate var onCancel: (String) -> Void = { _ in }
-    fileprivate var onFieldChange: (String, String) -> Void = { _, _ in }
-    fileprivate var onSave: (String) -> Void = { _ in }
-
-    public func isEditing(_ name: String) -> Bool { editingFields[name] == true }
-
-    public func fieldValue(_ field: ProfileField) -> String {
-        editedValues[field.name] ?? stringifyFieldValue(field.rawValue)
-    }
-
-    public func fieldError(_ name: String) -> String? { fieldErrors[name] }
-
-    public func edit(_ name: String) { onEdit(name) }
-
-    public func cancel(_ name: String) { onCancel(name) }
-
-    public func setFieldValue(_ name: String, _ value: String) { onFieldChange(name, value) }
-
-    public func save(_ name: String) { onSave(name) }
+/// Whether a schema attribute name matches one of `UserAvatar.swift`'s `pictureClaimKeys`, so the
+/// profile picture is edited from the avatar itself instead of appearing twice, once there and once
+/// as an ordinary row.
+func isPictureField(_ name: String) -> Bool {
+    pictureClaimKeys.contains { $0.compare(name, options: .caseInsensitive) == .orderedSame }
 }
 
 /// Editable, schema-driven user profile.
@@ -256,36 +30,132 @@ public struct UserProfile: View {
 
     public var body: some View {
         BaseUserProfile(attributeMapping: attributeMapping, onSaved: onSaved, onError: onError) { state in
-            VStack(alignment: .leading, spacing: 12) {
-                Text(i18n.resolve("userProfile.title"))
-                    .font(.title2)
-                    .bold()
-                    .accessibilityAddTraits(.isHeader)
-                if state.isLoading && state.profile == nil {
-                    Text(i18n.resolve("userProfile.loading"))
-                } else if let error = state.error {
-                    Text(error).foregroundColor(.red)
-                } else {
-                    if !state.displayName.isEmpty {
-                        VStack(spacing: 8) {
-                            UserAvatar(size: 64)
-                            Text(state.displayName).font(.headline)
-                            if let email = state.email {
-                                Text(email)
-                                    .font(.subheadline)
-                                    .foregroundColor(.secondary)
-                            }
+            UserProfileContent(state: state, i18n: i18n)
+        }
+    }
+}
+
+/// Renders the loaded profile: avatar header, then a grouped "Personal Info" card whose rows open
+/// a bottom-sheet editor on tap, matching the iOS Settings-style grouped-list convention.
+private struct UserProfileContent: View {
+    @ObservedObject var state: UserProfileState
+    let i18n: ThunderIDI18n
+    @Environment(\.colorScheme) private var colorScheme
+
+    /// Only one field can be mid-edit at a time (`UserProfileState.editingFields` is exclusive in
+    /// practice), so the currently-editing field doubles as the sheet's `item`. Dismissing the
+    /// sheet by any means (Save, Cancel, or a swipe-down) routes back through `state.cancel` so the
+    /// underlying edit state and the sheet's presence never drift apart.
+    private var editingField: Binding<ProfileField?> {
+        Binding(
+            get: { state.fields.first { state.isEditing($0.name) } },
+            set: { newValue in
+                guard newValue == nil else { return }
+                guard let field = state.fields.first(where: { state.isEditing($0.name) }) else { return }
+                state.cancel(field.name)
+            }
+        )
+    }
+
+    /// The picture attribute, if the schema declares one and it isn't readonly: edited from the
+    /// avatar's own EDIT badge instead of appearing again as an ordinary "Personal Info" row.
+    private var editablePictureField: ProfileField? {
+        state.fields.first { isPictureField($0.name) && !$0.isReadonly }
+    }
+
+    private var visibleFields: [ProfileField] {
+        state.fields.filter { !isPictureField($0.name) }
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if state.isLoading && state.profile == nil {
+                Text(i18n.resolve("userProfile.loading"))
+                    .foregroundColor(colorScheme.userProfileTextSecondary)
+            } else if let error = state.error {
+                Text(error).foregroundColor(colorScheme.userProfileError)
+            } else {
+                if !state.displayName.isEmpty {
+                    header
+                }
+                if !visibleFields.isEmpty {
+                    section
+                }
+            }
+        }
+        .sheet(item: editingField) { field in
+            ProfileFieldEditSheet(field: field, state: state, i18n: i18n)
+        }
+    }
+
+    private var header: some View {
+        VStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [.userProfileAccent, Color(red: 0x8B / 255, green: 0xF9 / 255, blue: 0xFA / 255)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 88, height: 88)
+                UserAvatar(size: 82)
+                if let pictureField = editablePictureField {
+                    Button { state.edit(pictureField.name) } label: {
+                        VStack {
+                            Spacer()
+                            Text(i18n.resolve("userProfile.edit"))
+                                .font(.system(size: 10, weight: .bold))
+                                .textCase(.uppercase)
+                                .tracking(0.5)
+                                .foregroundColor(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 6)
+                                .background(Color.black.opacity(0.55))
                         }
-                        .frame(maxWidth: .infinity)
-                        Divider()
                     }
-                    ForEach(state.fields) { field in
-                        ProfileFieldRow(field: field, state: state, i18n: i18n)
+                    .buttonStyle(.plain)
+                    .frame(width: 82, height: 82)
+                    .clipShape(Circle())
+                    .accessibilityLabel(i18n.resolve("userProfile.edit"))
+                }
+            }
+            VStack(spacing: 2) {
+                Text(state.displayName)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundColor(colorScheme.userProfileText)
+                    .accessibilityAddTraits(.isHeader)
+                if let email = state.email {
+                    Text(email)
+                        .font(.system(size: 14.5))
+                        .foregroundColor(colorScheme.userProfileTextSecondary)
+                }
+            }
+        }
+        .padding(.bottom, 28)
+    }
+
+    private var section: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(i18n.resolve("userProfile.section"))
+                .font(.system(size: 13, weight: .semibold))
+                .textCase(.uppercase)
+                .foregroundColor(colorScheme.userProfileTextSecondary)
+                .padding(.leading, 16)
+
+            VStack(spacing: 0) {
+                ForEach(Array(visibleFields.enumerated()), id: \.element.id) { index, field in
+                    ProfileFieldRow(field: field, state: state)
+                    if index < visibleFields.count - 1 {
                         Divider()
+                            .background(colorScheme.userProfileBorder)
+                            .padding(.leading, 16)
                     }
                 }
             }
-            .padding()
+            .background(colorScheme.userProfileCard)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
         }
     }
 }
@@ -293,51 +163,101 @@ public struct UserProfile: View {
 private struct ProfileFieldRow: View {
     let field: ProfileField
     @ObservedObject var state: UserProfileState
-    let i18n: ThunderIDI18n
+    @Environment(\.colorScheme) private var colorScheme
 
     private var label: String { field.schema.displayName ?? field.schema.description ?? field.name }
     private var isComplex: Bool { field.schema.type == "COMPLEX" && field.rawValue is [String: AnyCodable] }
-    private var isEditing: Bool { state.isEditing(field.name) }
+    private var isEditable: Bool { !field.isReadonly && !isComplex }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.caption)
-                .foregroundColor(.secondary)
+        Button {
+            state.edit(field.name)
+        } label: {
             HStack {
+                Text(label)
+                    .font(.system(size: 16))
+                    .foregroundColor(colorScheme.userProfileText)
+                Spacer()
                 if isComplex, let dict = field.rawValue as? [String: AnyCodable] {
                     ComplexValueView(value: dict)
-                } else if isEditing && !field.isReadonly {
-                    ProfileFieldEditor(field: field, state: state)
                 } else {
                     let text = stringifyFieldValue(field.rawValue)
                     Text(text.isEmpty ? "-" : text)
+                        .font(.system(size: 16))
+                        .foregroundColor(colorScheme.userProfileTextSecondary)
                 }
-                Spacer()
-                if isEditing && !field.isReadonly {
-                    Button(i18n.resolve("userProfile.save")) { state.save(field.name) }
-                    Button(i18n.resolve("userProfile.cancel")) { state.cancel(field.name) }
-                } else if !field.isReadonly && !isComplex {
-                    Button {
-                        state.edit(field.name)
-                    } label: {
-                        Image(systemName: "pencil")
-                    }
-                    .accessibilityLabel(i18n.resolve("userProfile.edit"))
+                if isEditable {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(colorScheme.userProfileChevron)
                 }
             }
-            if let message = state.fieldError(field.name) {
-                Text(message)
-                    .font(.caption2)
-                    .foregroundColor(.red)
-            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 13)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .disabled(!isEditable)
+    }
+}
+
+/// Full-screen bottom-sheet editor for one field, matching the mock's Cancel / label / Save header.
+private struct ProfileFieldEditSheet: View {
+    let field: ProfileField
+    @ObservedObject var state: UserProfileState
+    let i18n: ThunderIDI18n
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var label: String { field.schema.displayName ?? field.schema.description ?? field.name }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Button(i18n.resolve("userProfile.cancel")) { state.cancel(field.name) }
+                    .font(.system(size: 17))
+                    .foregroundColor(.userProfileAccent)
+                Spacer()
+                Text(label)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(colorScheme.userProfileText)
+                Spacer()
+                Button(i18n.resolve("userProfile.save")) { state.save(field.name) }
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.userProfileAccent)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 22)
+            .padding(.bottom, 18)
+
+            VStack(alignment: .leading, spacing: 6) {
+                ProfileFieldEditor(field: field, state: state)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(colorScheme.userProfileSheetField)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                if let message = state.fieldError(field.name) {
+                    Text(message)
+                        .font(.system(size: 12.5))
+                        .foregroundColor(colorScheme.userProfileError)
+                        .padding(.leading, 4)
+                }
+            }
+            .padding(.horizontal, 20)
+
+            Spacer()
+        }
+        .presentationDetents([.fraction(0.35), .medium])
+        .presentationDragIndicator(.hidden)
     }
 }
 
 private struct ProfileFieldEditor: View {
     let field: ProfileField
     @ObservedObject var state: UserProfileState
+    @Environment(\.colorScheme) private var colorScheme
+
+    private var label: String { field.schema.displayName ?? field.schema.description ?? field.name }
 
     var body: some View {
         if field.schema.type == "BOOLEAN" {
@@ -349,144 +269,67 @@ private struct ProfileFieldEditor: View {
             }
             .labelsHidden()
         } else {
-            TextField(field.name, text: Binding(
+            TextField(label, text: Binding(
                 get: { state.fieldValue(field) },
                 set: { state.setFieldValue(field.name, $0) }
             ))
-            .accessibilityLabel(field.name)
+            .textFieldStyle(.plain)
+            .font(.system(size: 16))
+            .foregroundColor(colorScheme.userProfileText)
+            .accessibilityLabel(label)
         }
     }
 }
 
 private struct ComplexValueView: View {
     let value: [String: AnyCodable]
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        VStack(alignment: .leading) {
+        VStack(alignment: .trailing, spacing: 2) {
             ForEach(value.keys.sorted(), id: \.self) { key in
-                HStack {
-                    Text("\(key):").font(.caption2)
-                    Text(value[key].map { "\($0.value)" } ?? "")
-                }
+                Text("\(key): \(value[key].map { "\($0.value)" } ?? "")")
+                    .font(.system(size: 13))
+                    .foregroundColor(colorScheme.userProfileTextSecondary)
             }
         }
     }
 }
 
-/// Unstyled base variant (spec §8.3).
-public struct BaseUserProfile<Content: View>: View {
-    @EnvironmentObject private var thunderState: ThunderIDState
-    public let attributeMapping: [String: [String]]
-    public let onSaved: (() -> Void)?
-    public let onError: (() -> Void)?
-    public let content: (UserProfileState) -> Content
+/// Color tokens for `UserProfile`, matching the same light/dark hex palette the Quickstart sample's
+/// own screens use (see `bgColor`/`textColor`/`mutedColor`/`borderColor`/`cardColor` in
+/// `SignInView.swift`/`HomeView.swift`), so the component reads as part of one continuous
+/// ThunderID-branded surface instead of falling back to plain iOS system gray in dark mode.
+private extension ColorScheme {
+    var userProfileCard: Color { self == .dark ? Color(hex: "111c2e") : Color(hex: "ffffff") }
+    var userProfileSheetField: Color { self == .dark ? Color(hex: "16233a") : Color(hex: "f1f3f7") }
+    var userProfileText: Color { self == .dark ? Color(hex: "E0EAFF") : Color(hex: "05213F") }
+    var userProfileError: Color { Color(hex: "d95757") }
 
-    @StateObject private var state = UserProfileState()
-
-    public init(
-        attributeMapping: [String: [String]] = [:],
-        onSaved: (() -> Void)? = nil,
-        onError: (() -> Void)? = nil,
-        @ViewBuilder content: @escaping (UserProfileState) -> Content
-    ) {
-        self.attributeMapping = attributeMapping
-        self.onSaved = onSaved
-        self.onError = onError
-        self.content = content
+    var userProfileTextSecondary: Color {
+        self == .dark ? Color(hex: "E0EAFF").opacity(0.48) : Color(hex: "5A7085")
     }
 
-    public var body: some View {
-        content(state)
-            .task {
-                wireCallbacks()
-                guard thunderState.fetchUserProfileEnabled else { return }
-                await loadProfile()
-            }
-            // No /users/me - render from thunderState.user's claims (fetchUserProfile == false).
-            .task(id: "\(thunderState.user?.sub ?? "")|\(thunderState.fetchUserProfileEnabled)") {
-                guard !thunderState.fetchUserProfileEnabled else { return }
-                applyClaimsFallback()
-            }
+    var userProfileChevron: Color {
+        self == .dark ? Color(hex: "E0EAFF").opacity(0.3) : Color(hex: "5A7085").opacity(0.55)
     }
 
-    private func applyProfile(_ loadedProfile: ThunderID.UserProfile) {
-        state.profile = loadedProfile
-        state.fields = buildProfileFields(schema: state.schema, profile: loadedProfile)
-        state.displayName = computeDisplayName(attributeMapping, loadedProfile)
-        state.email = mapAttribute("email", attributeMapping, loadedProfile)
-
-        // Reflect an edit immediately, without waiting for the next refresh.
-        thunderState.mergeUserProfile(loadedProfile)
+    var userProfileBorder: Color {
+        self == .dark ? Color.white.opacity(0.09) : Color(hex: "DDE3EC")
     }
+}
 
-    private func applyClaimsFallback() {
-        let user = thunderState.user
-        state.fields = buildProfileFieldsFromClaims(user)
-        state.displayName = claimsDisplayName(user)
-        state.email = user?.email
-        state.error = nil
-        state.isLoading = false
-    }
+private extension Color {
+    /// ThunderID brand blue, matching the sample's own `primaryBlue` (same value as Android's `ThunderIDPrimary`).
+    static let userProfileAccent = Color(hex: "3688FF")
 
-    private func loadProfile() async {
-        state.isLoading = true
-        defer { state.isLoading = false }
-        do {
-            async let loadedSchema = thunderState.client.getUserSchema()
-            async let loadedProfile = thunderState.client.getUserProfile()
-            let (schemaResult, profileResult) = try await (loadedSchema, loadedProfile)
-            state.schema = schemaResult
-            applyProfile(profileResult)
-        } catch {
-            state.error = error.localizedDescription
-        }
-    }
-
-    private func editField(_ name: String) {
-        guard let field = state.fields.first(where: { $0.name == name }) else { return }
-        state.editedValues[name] = stringifyFieldValue(field.rawValue)
-        state.editingFields[name] = true
-        state.fieldErrors.removeValue(forKey: name)
-    }
-
-    private func cancelField(_ name: String) {
-        state.editingFields[name] = false
-        state.editedValues.removeValue(forKey: name)
-        state.fieldErrors.removeValue(forKey: name)
-    }
-
-    private func saveField(_ name: String) {
-        guard let field = state.fields.first(where: { $0.name == name }) else { return }
-        let value = state.editedValues[name] ?? stringifyFieldValue(field.rawValue)
-        if let validationKey = validateField(field.schema, value) {
-            state.fieldErrors[name] = thunderState.i18n.resolve(validationKey)
-            return
-        }
-        state.fieldErrors.removeValue(forKey: name)
-        Task { await performSave(name: name, field: field, value: value) }
-    }
-
-    private func performSave(name: String, field: ProfileField, value: String) async {
-        state.isLoading = true
-        defer { state.isLoading = false }
-        do {
-            let fieldPayload = buildUpdatePayload(name, value, field.isMultiValued)
-            let currentAttributes = state.profile.map { deepUnwrapAttributes($0.attributes) } ?? [:]
-            let payload = deepMergeAttributes(currentAttributes, fieldPayload)
-            applyProfile(try await thunderState.client.updateUserProfile(payload: payload))
-            state.editingFields[name] = false
-            state.editedValues.removeValue(forKey: name)
-            onSaved?()
-        } catch {
-            state.fieldErrors[name] = error.localizedDescription
-            onError?()
-        }
-    }
-
-    private func wireCallbacks() {
-        state.onEdit = editField
-        state.onCancel = cancelField
-        state.onFieldChange = { state.editedValues[$0] = $1 }
-        state.onSave = saveField
+    init(hex: String) {
+        var value: UInt64 = 0
+        Scanner(string: hex).scanHexInt64(&value)
+        self.init(
+            red: Double((value & 0xFF0000) >> 16) / 255,
+            green: Double((value & 0x00FF00) >> 8) / 255,
+            blue: Double(value & 0x0000FF) / 255
+        )
     }
 }
