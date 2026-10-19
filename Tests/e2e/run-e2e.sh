@@ -22,6 +22,7 @@
 #   E2E_USERNAME       Test user to create (default e2e_mobile_user)
 #   E2E_PASSWORD       Test user password (default TestPassword@123)
 #   INSTALL_DIR        Where to unpack the distribution (default ./.thunderid-server)
+#   GITHUB_TOKEN       Optional. Authenticates the latest-release lookup against the API rate limit
 #
 # Why not `npx thunderid`? That wrapper renders an interactive TUI and aborts with
 # "bubbletea: could not open TTY" when stdout is not a terminal, which is always the case on a CI
@@ -53,7 +54,7 @@ for arg in "$@"; do
         --skip-server) do_server=false ;;
         --skip-build) do_build=false ;;
         --skip-test) do_test=false ;;
-        -h | --help) sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) maestro_args+=("$arg") ;;
     esac
 done
@@ -65,6 +66,36 @@ done
 # ---------------------------------------------------------------------------------------------
 # Start
 # ---------------------------------------------------------------------------------------------
+
+# The server hashes passwords with PBKDF2 at 600,000 iterations by default. On a CI runner that is
+# also driving an emulator or simulator, a single credential submission has been measured at
+# 17-44s - past the server's fixed 10s write timeout, so it logs a 200 that the client never
+# receives and the app reports the connection as lost (NSURLErrorDomain -1005). This server is
+# thrown away after the run, so trade hashing cost for headroom. Each stored credential records
+# the iteration count it was hashed with, so this only affects hashes this server creates.
+E2E_PBKDF2_ITERATIONS=10000
+
+lower_password_hashing_cost() {
+    local config="$1"
+    if grep -qE '^[[:space:]]+pbkdf2:' "$config"; then
+        return 0
+    fi
+    # Insert the override directly under `crypto.password_hashing.algorithm`. A distribution that
+    # has reshaped that block still runs, just at the default cost, so warn rather than fail.
+    awk -v iterations="$E2E_PBKDF2_ITERATIONS" '
+        { print }
+        /^  password_hashing:/ { in_hashing = 1; next }
+        in_hashing && /^    algorithm:/ {
+            print "    pbkdf2:"
+            print "      iterations: " iterations
+            in_hashing = 0
+        }
+    ' "$config" > "$config.tmp" && mv "$config.tmp" "$config"
+    if ! grep -qE '^      iterations: ' "$config"; then
+        echo "WARNING: could not lower the password hashing cost in $config; using the server default." >&2
+    fi
+}
+
 start_server() {
     # Reuse a server that is already serving. All three mobile SDK suites bind the same port, so
     # failing here would mean tearing down a perfectly good server just to start an identical one.
@@ -91,7 +122,15 @@ start_server() {
     local version="${THUNDERID_VERSION:-}"
     if [ -z "$version" ]; then
         echo "==> Resolving the latest ThunderID release"
-        version=$(curl -sSL https://api.github.com/repos/thunder-id/thunderid/releases/latest |
+        # Unauthenticated GitHub API calls share a budget of 60 an hour per IP address, and hosted
+        # runners share their outbound IPs, so on CI that budget is regularly spent before this
+        # call is made. Authenticate when a token is available; a local run without one still works.
+        local api_auth=""
+        if [ -n "${GITHUB_TOKEN:-}" ]; then
+            api_auth="Authorization: Bearer $GITHUB_TOKEN"
+        fi
+        version=$(curl -sSL ${api_auth:+-H "$api_auth"} \
+            https://api.github.com/repos/thunder-id/thunderid/releases/latest |
             jq -r '.tag_name // empty' | sed 's/^v//')
         if [ -z "$version" ]; then
             echo "ERROR: could not resolve the latest release (rate limited?). Set THUNDERID_VERSION." >&2
@@ -109,6 +148,8 @@ start_server() {
         curl -sSLf "$url" -o "$INSTALL_DIR/$archive"
         unzip -q "$INSTALL_DIR/$archive" -d "$INSTALL_DIR"
     fi
+
+    lower_password_hashing_cost "$dist_home/deployment.yaml"
 
     echo "==> Running first-time setup"
     (cd "$dist_home" && ./setup.sh --admin-username "$ADMIN_USER" --admin-password "$ADMIN_PASS")
@@ -390,6 +431,24 @@ run_flows() {
     else
         target=("${maestro_args[@]}")
     fi
+
+    # The server log says what the server was asked and what it answered. Without the app's own
+    # output there is no way to tell a server that never replied from an app that ignored the
+    # reply, which is the difference between a product bug and a test bug. Stream the sample's
+    # console to a file for the duration of the run.
+    local app_log="$SCRIPT_DIR/app.log"
+    : > "$app_log"
+    xcrun simctl spawn "$SIM_UDID" log stream \
+        --style compact \
+        --predicate 'processImagePath CONTAINS "Quickstart"' \
+        >> "$app_log" 2>&1 &
+    local log_pid=$!
+    # Stop the stream however the run ends, including a failed flow under `set -e`. The pid is
+    # expanded into the trap now rather than read back at exit: it is function-local, the trap
+    # fires after the function has returned, and under `set -u` a late lookup aborts the script
+    # with "log_pid: unbound variable" after the flows have already passed.
+    # shellcheck disable=SC2064
+    trap "kill $log_pid 2>/dev/null || true" EXIT
 
     echo "==> Running Maestro"
     # The JUnit report is what makes a failed run readable without scraping the console log; it

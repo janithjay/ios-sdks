@@ -54,6 +54,9 @@ jobs:
         working-directory: Tests/e2e
         env:
           THUNDERID_VERSION: ${{ inputs.thunderid-version }}
+          # Authenticates run-e2e.sh's latest-release lookup. Unauthenticated, it shares the
+          # runner IP's 60-an-hour GitHub API budget and fails before the suite starts.
+          GITHUB_TOKEN: ${{ github.token }}
         run: ./run-e2e.sh
 
       - name: 📤 Upload Debug Artifacts
@@ -62,10 +65,13 @@ jobs:
         with:
           name: e2e-debug-ios${{ inputs.artifact-suffix }}
           # Maestro writes screenshots, the recorded hierarchy and its own logs here on failure,
-          # which is the only way to tell a genuine regression from a flake after the fact.
+          # which is the only way to tell a genuine regression from a flake after the fact. The
+          # app's own console output (app.log) is what tells a server that never replied apart
+          # from an app that dropped the reply.
           path: |
             ~/.maestro/tests
             Tests/e2e/report.xml
+            Tests/e2e/app.log
             Tests/e2e/.thunderid-server/server.log
           retention-days: 7
           if-no-files-found: ignore

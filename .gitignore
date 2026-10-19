@@ -69,3 +69,6 @@ fastlane/test_output
 
 # Maestro JUnit report from the E2E suite.
 Tests/e2e/report.xml
+
+# Sample console output streamed during the E2E suite.
+Tests/e2e/app.log
