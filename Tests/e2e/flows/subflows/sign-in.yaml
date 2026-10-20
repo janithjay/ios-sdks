@@ -31,12 +31,27 @@ appId: dev.thunderid.Quickstart
 # The retried view is not guaranteed to come back blank - a failed submission can just as easily
 # leave the previous attempt's text sitting in the field - so each retry erases before typing
 # rather than assuming an empty field.
+#
+# eraseText deletes from whichever field holds the keyboard, not the one just tapped. On a loaded
+# CI runner the tap can land before focus actually moves, and the erase meant for the password
+# then empties the username instead - a debug hierarchy from a retried run shows exactly that, an
+# empty username beside a full password. Maestro cannot wait for keyboard focus on iOS (its
+# `focused` selector is not reliable there; see mobile-dev-inc/maestro#2842), so the first
+# attempt, whose form is freshly rendered and empty, does not erase at all, and only a retry
+# clears what a previous attempt left behind. The username is then checked before submitting, so
+# one lost to a retry's erase goes back round the retry rather than on to the server.
+- evalScript: ${output.signInAttempt = 0}
 - retry:
     maxRetries: 2
     commands:
+      - evalScript: ${output.signInAttempt = output.signInAttempt + 1}
       - tapOn:
           id: "thunderid-field-username"
-      - eraseText: 50
+      - runFlow:
+          when:
+            true: ${output.signInAttempt > 1}
+          commands:
+            - eraseText: 50
       - inputText: ${E2E_USERNAME}
 
       # tapOn's own element-lookup timeout is much shorter than extendedWaitUntil's, and is not
@@ -47,8 +62,16 @@ appId: dev.thunderid.Quickstart
           timeout: 20000
       - tapOn:
           id: "thunderid-field-password"
-      - eraseText: 50
+      - runFlow:
+          when:
+            true: ${output.signInAttempt > 1}
+          commands:
+            - eraseText: 50
       - inputText: ${E2E_PASSWORD}
+
+      - assertVisible:
+          id: "thunderid-field-username"
+          text: ${E2E_USERNAME}
 
       - tapOn:
           id: "thunderid-action-action_001"

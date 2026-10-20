@@ -380,6 +380,37 @@ resolve_simulator() {
     xcrun simctl bootstatus "$SIM_UDID" -b
 }
 
+# The simulator's trustd periodically refreshes its certificate revocation database from
+# valid.apple.com, and while it does, every trust evaluation waits on it - including the app's own
+# check of its connection to the local server, which runs through trustd even though the sample
+# pins the server's self-signed certificate. On hosted runners the refresh has been seen holding
+# trustd for minutes: hanging on the download, or holding its database locked ("database is
+# locked in SELECT ival FROM admin") while it rebuilds. The app's handshake then stalls, the
+# server drops it after 10s ("TLS handshake error ... i/o timeout"), and a step never renders.
+#
+# trustd skips the refresh when ValidUpdateEnabled is false, read with CFPreferencesCopyValue at
+# kCFPreferencesAnyUser/kCFPreferencesCurrentHost (SecRevocationDb.c). Inside the simulator that
+# scope resolves to Library/Preferences/ByHost/com.apple.security..plist under the device's home
+# - the host id is empty, hence the double dot - and `defaults -currentHost write` does not reach
+# it, so the file is written directly. cfprefsd keeps serving its cached copy of a file edited
+# behind its back, so it is restarted to pick the value up, and trustd after it, so trustd reads
+# the value instead of acting on a refresh it scheduled at boot. Only in CI: a developer's own
+# simulator keeps its normal behaviour.
+disable_revocation_updates() {
+    [ -n "${CI:-}" ] || return 0
+    local sim_home prefs
+    sim_home=$(xcrun simctl getenv "$SIM_UDID" HOME)
+    prefs="$sim_home/Library/Preferences/ByHost/com.apple.security..plist"
+    echo "==> Disabling the simulator's revocation database updates"
+    mkdir -p "$(dirname "$prefs")"
+    [ -f "$prefs" ] || plutil -create xml1 "$prefs"
+    plutil -replace ValidUpdateEnabled -bool NO "$prefs"
+    local service
+    for service in com.apple.cfprefsd.xpc.daemon com.apple.trustd; do
+        xcrun simctl spawn "$SIM_UDID" launchctl kill SIGKILL "user/foreground/$service" 2>/dev/null || true
+    done
+}
+
 # ---------------------------------------------------------------------------------------------
 # Build and install the sample
 # ---------------------------------------------------------------------------------------------
@@ -469,6 +500,9 @@ if $do_server; then
     echo "  test user      : $E2E_USER"
     echo
 fi
-if $do_build || $do_test; then resolve_simulator; fi
+if $do_build || $do_test; then
+    resolve_simulator
+    disable_revocation_updates
+fi
 $do_build && build_sample
 $do_test && run_flows
