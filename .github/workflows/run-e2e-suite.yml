@@ -49,6 +49,23 @@ jobs:
           curl -Ls "https://get.maestro.mobile.dev" | bash
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
 
+      - name: 🚫 Block the Simulator's Revocation Database Update
+        shell: bash
+        # The simulator's trustd periodically refreshes its certificate revocation database from
+        # valid.apple.com. From hosted runners that request has been seen hanging for 30s and then
+        # failing with a TLS error (-1200), retrying throughout the run, and while it does, the
+        # app's own certificate check on its connection to the local server never completes: the
+        # handshake stalls at "Asyncing for external verify block", the server drops it after 10s
+        # ("TLS handshake error ... i/o timeout"), and the sign-in form never renders. The
+        # simulator resolves names through this runner's resolver, so pointing the host at an
+        # unroutable address makes the refresh fail immediately instead.
+        run: |
+          printf '0.0.0.0 valid.apple.com\n:: valid.apple.com\n' | sudo tee -a /etc/hosts
+          sudo dscacheutil -flushcache
+          sudo killall -HUP mDNSResponder
+          # Shows the block took effect: both addresses should be the unroutable ones above.
+          dscacheutil -q host -a name valid.apple.com
+
       - name: 🔬 Run E2E Suite
         shell: bash
         working-directory: Tests/e2e
