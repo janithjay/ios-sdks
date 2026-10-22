@@ -37,6 +37,7 @@ identifier_name:
   excluded:
     - id
     - bg
+    - os
 
 type_body_length:
   warning: 350

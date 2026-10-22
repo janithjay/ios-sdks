@@ -311,6 +311,50 @@ public final class ThunderIDClient {
         currentUser = user
     }
 
+    // MARK: - Sessions
+
+    /// Retrieves one page of the signed-in user's live SSO sessions via `GET /sessions/me`, most
+    /// recently active first. The session that issued the access token has `isCurrent` set.
+    public func getUserSessions(limit: Int? = nil, offset: Int? = nil) async throws -> SSOSessionListResponse {
+        try requireInitialized()
+        return try await httpClient!.get(path: Self.sessionsPath(limit: limit, offset: offset))
+    }
+
+    /// Revokes one of the signed-in user's SSO sessions via `DELETE /sessions/me/{id}`. The server
+    /// signs it out and revokes the tokens its applications were issued. A session that is already
+    /// gone fails with ``ThunderIDErrorCode/notFound``.
+    public func revokeUserSession(sessionId: String) async throws {
+        try requireInitialized()
+        try await httpClient!.delete(path: Self.sessionPath(sessionId))
+    }
+
+    /// Revokes the signed-in user's SSO sessions via `DELETE /sessions/me`. With `exceptCurrent`,
+    /// the session that issued the access token is kept, so the user stays signed in.
+    public func revokeUserSessions(exceptCurrent: Bool = false) async throws {
+        try requireInitialized()
+        let path = exceptCurrent ? "\(Self.sessionsBasePath)?exceptCurrent=true" : Self.sessionsBasePath
+        try await httpClient!.delete(path: path)
+    }
+
+    static let sessionsBasePath = "/sessions/me"
+
+    /// The session list path, with only the paging values the caller set.
+    static func sessionsPath(limit: Int?, offset: Int?) -> String {
+        let query = [limit.map { "limit=\($0)" }, offset.map { "offset=\($0)" }].compactMap { $0 }
+        return query.isEmpty ? sessionsBasePath : "\(sessionsBasePath)?\(query.joined(separator: "&"))"
+    }
+
+    /// Addresses one session, rejecting a blank identifier and encoding it as a path segment.
+    static func sessionPath(_ sessionId: String) throws -> String {
+        guard !sessionId.trimmingCharacters(in: .whitespaces).isEmpty else {
+            throw ThunderIDError(code: .invalidInput, message: "sessionId is required")
+        }
+        var segment = CharacterSet.urlPathAllowed
+        segment.remove("/")
+        let encoded = sessionId.addingPercentEncoding(withAllowedCharacters: segment) ?? sessionId
+        return "\(sessionsBasePath)/\(encoded)"
+    }
+
     // MARK: - Flow Meta
 
     public func getFlowMeta(applicationId: String, language: String = "en-US") async throws -> [String: Any] {

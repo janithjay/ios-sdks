@@ -78,6 +78,7 @@ final class HTTPClient {
         request.assumesHTTP3Capable = false
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(UserAgent.value, forHTTPHeaderField: "User-Agent")
         request.httpBody = body
         if let provider = accessTokenProvider {
             let token = try await provider()
@@ -103,6 +104,7 @@ final class HTTPClient {
         // over TLS instead, which correctly routes through LocalhostPinnedURLSession's delegate.
         request.assumesHTTP3Capable = false
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(UserAgent.value, forHTTPHeaderField: "User-Agent")
         if let body {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
